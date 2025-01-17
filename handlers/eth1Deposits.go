@@ -2,20 +2,21 @@ package handlers
 
 import (
 	"encoding/json"
-	"eth2-exporter/db"
-	"eth2-exporter/services"
-	"eth2-exporter/templates"
-	"eth2-exporter/types"
-	"eth2-exporter/utils"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/db"
+	"github.com/gobitfly/eth2-beaconchain-explorer/services"
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 )
 
 // Deposits will return information about deposits using a go template
 func Deposits(w http.ResponseWriter, r *http.Request) {
-
-	var DepositsTemplate = templates.GetTemplate("layout.html", "deposits.html", "index/depositChart.html")
+	templateFiles := append(layoutTemplateFiles, "deposits.html", "index/depositChart.html")
+	var DepositsTemplate = templates.GetTemplate(templateFiles...)
 
 	w.Header().Set("Content-Type", "text/html")
 
@@ -32,10 +33,9 @@ func Deposits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pageData.Stats = services.GetLatestStats()
-	pageData.DepositContract = utils.Config.Chain.Config.DepositContractAddress
+	pageData.DepositContract = utils.Config.Chain.ClConfig.DepositContractAddress
 
-	data := InitPageData(w, r, "blockchain", "/deposits", "Deposits")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "blockchain", "/deposits", "Deposits", templateFiles)
 	data.Data = pageData
 
 	if handleTemplateError(w, r, "eth1Depostis.go", "Deposits", "", DepositsTemplate.ExecuteTemplate(w, "layout", data)) != nil {
@@ -44,33 +44,7 @@ func Deposits(w http.ResponseWriter, r *http.Request) {
 }
 
 func Eth1Deposits(w http.ResponseWriter, r *http.Request) {
-
-	var eth1DepositsTemplate = templates.GetTemplate("layout.html", "eth1Deposits.html", "index/depositChart.html")
-
-	w.Header().Set("Content-Type", "text/html")
-
-	pageData := &types.EthOneDepositsPageData{}
-
-	latestChartsPageData := services.LatestChartsPageData()
-	if len(latestChartsPageData) != 0 {
-		for _, c := range latestChartsPageData {
-			if c.Path == "deposits" {
-				pageData.DepositChart = c
-				break
-			}
-		}
-	}
-
-	pageData.Stats = services.GetLatestStats()
-	pageData.DepositContract = utils.Config.Chain.Config.DepositContractAddress
-
-	data := InitPageData(w, r, "blockchain", "/deposits/eth1", "Initiated Deposits")
-	data.HeaderAd = true
-	data.Data = pageData
-
-	if handleTemplateError(w, r, "eth1Depostis.go", "Eth1Deposits", "", eth1DepositsTemplate.ExecuteTemplate(w, "layout", data)) != nil {
-		return // an error has occurred and was processed
-	}
+	http.Redirect(w, r, "/validators/deposits", http.StatusMovedPermanently)
 }
 
 // Eth1DepositsData will return eth1-deposits as json
@@ -81,57 +55,39 @@ func Eth1DepositsData(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 
-	search := q.Get("search[value]")
+	search := ReplaceEnsNameWithAddress(q.Get("search[value]"))
 	search = strings.Replace(search, "0x", "", -1)
 
 	draw, err := strconv.ParseUint(q.Get("draw"), 10, 64)
 	if err != nil {
-		logger.Errorf("error converting datatables data parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		logger.Warnf("error converting datatables draw parameter from string to int: %v", err)
+		http.Error(w, "Error: Missing or invalid parameter draw", http.StatusBadRequest)
 		return
 	}
 	start, err := strconv.ParseUint(q.Get("start"), 10, 64)
 	if err != nil {
-		logger.Errorf("error converting datatables start parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		logger.Warnf("error converting datatables start parameter from string to int: %v", err)
+		http.Error(w, "Error: Missing or invalid parameter start", http.StatusBadRequest)
 		return
 	}
 	length, err := strconv.ParseUint(q.Get("length"), 10, 64)
 	if err != nil {
-		logger.Errorf("error converting datatables length parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		logger.Warnf("error converting datatables length parameter from string to int: %v", err)
+		http.Error(w, "Error: Missing or invalid parameter length", http.StatusBadRequest)
 		return
 	}
 	if length > 100 {
 		length = 100
 	}
-
-	orderColumn := q.Get("order[0][column]")
-	orderByMap := map[string]string{
-		"0": "from_address",
-		"1": "publickey",
-		"2": "withdrawal_credential",
-		"3": "amount",
-		"4": "tx_hash",
-		"5": "block_ts",
-		"6": "block_number",
-		"7": "state",
-		"8": "valid_signature",
-	}
-	orderBy, exists := orderByMap[orderColumn]
-	if !exists {
-		orderBy = "block_ts"
-	}
-
 	orderDir := q.Get("order[0][dir]")
 
 	latestEpoch := services.LatestEpoch()
 	validatorOnlineThresholdSlot := GetValidatorOnlineThresholdSlot()
 
-	deposits, depositCount, err := db.GetEth1DepositsJoinEth2Deposits(search, length, start, orderBy, orderDir, latestEpoch, validatorOnlineThresholdSlot)
+	deposits, depositCount, err := db.GetEth1DepositsJoinEth2Deposits(search, length, start, orderDir, latestEpoch, validatorOnlineThresholdSlot)
 	if err != nil {
 		logger.Errorf("GetEth1Deposits error retrieving eth1_deposit data: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -164,22 +120,22 @@ func Eth1DepositsData(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 }
 
 // Eth1Deposits will return information about deposits using a go template
 func Eth1DepositsLeaderboard(w http.ResponseWriter, r *http.Request) {
-	var eth1DepositsLeaderboardTemplate = templates.GetTemplate("layout.html", "eth1DepositsLeaderboard.html")
+	templateFiles := append(layoutTemplateFiles, "eth1DepositsLeaderboard.html")
+	var eth1DepositsLeaderboardTemplate = templates.GetTemplate(templateFiles...)
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "eth1Deposits", "/deposits/eth1", "Initiated Deposits")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "eth1Deposits", "/deposits/eth1", "Initiated Deposits", templateFiles)
 
 	data.Data = types.EthOneDepositLeaderBoardPageData{
-		DepositContract: utils.Config.Indexer.Eth1DepositContractAddress,
+		DepositContract: utils.Config.Chain.ClConfig.DepositContractAddress,
 	}
 
 	if handleTemplateError(w, r, "eth1Deposits.go", "Eth1DepositsLeaderboard", "", eth1DepositsLeaderboardTemplate.ExecuteTemplate(w, "layout", data)) != nil {
@@ -193,25 +149,25 @@ func Eth1DepositsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	q := r.URL.Query()
 
-	search := q.Get("search[value]")
+	search := ReplaceEnsNameWithAddress(q.Get("search[value]"))
 	search = strings.Replace(search, "0x", "", -1)
 
 	draw, err := strconv.ParseUint(q.Get("draw"), 10, 64)
 	if err != nil {
-		logger.Errorf("error converting datatables data parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		logger.Warnf("error converting datatables draw parameter from string to int: %v", err)
+		http.Error(w, "Error: Missing or invalid parameter draw", http.StatusBadRequest)
 		return
 	}
 	start, err := strconv.ParseUint(q.Get("start"), 10, 64)
 	if err != nil {
-		logger.Errorf("error converting datatables start parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		logger.Warnf("error converting datatables start parameter from string to int: %v", err)
+		http.Error(w, "Error: Missing or invalid parameter start", http.StatusBadRequest)
 		return
 	}
 	length, err := strconv.ParseUint(q.Get("length"), 10, 64)
 	if err != nil {
-		logger.Errorf("error converting datatables length parameter from string to int: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		logger.Warnf("error converting datatables length parameter from string to int: %v", err)
+		http.Error(w, "Error: Missing or invalid parameter length", http.StatusBadRequest)
 		return
 	}
 	if length > 100 {
@@ -240,7 +196,7 @@ func Eth1DepositsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	deposits, depositCount, err := db.GetEth1DepositsLeaderboard(search, length, start, orderBy, orderDir)
 	if err != nil {
 		logger.Errorf("GetEth1Deposits error retrieving eth1_deposit leaderboard data: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -276,7 +232,7 @@ func Eth1DepositsLeaderboardData(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 }

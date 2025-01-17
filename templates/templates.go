@@ -2,13 +2,14 @@ package templates
 
 import (
 	"embed"
-	"eth2-exporter/utils"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 
 	"github.com/sirupsen/logrus"
 )
@@ -31,13 +32,16 @@ func GetTemplate(files ...string) *template.Template {
 	name := strings.Join(files, "-")
 
 	if utils.Config.Frontend.Debug {
+		templateFiles := make([]string, len(files))
+		copy(templateFiles, files)
 		for i := range files {
 			if strings.HasPrefix(files[i], "templates") {
-				continue
+				templateFiles[i] = files[i]
+			} else {
+				templateFiles[i] = "templates/" + files[i]
 			}
-			files[i] = "templates/" + files[i]
 		}
-		return template.Must(template.New(name).Funcs(template.FuncMap(templateFuncs)).ParseFiles(files...))
+		return template.Must(template.New(name).Funcs(template.FuncMap(templateFuncs)).ParseFiles(templateFiles...))
 	}
 
 	templateCacheMux.RLock()
@@ -52,6 +56,11 @@ func GetTemplate(files ...string) *template.Template {
 	defer templateCacheMux.Unlock()
 	templateCache[name] = tmpl
 	return templateCache[name]
+}
+
+func GetTemplateNames() []string {
+	files, _ := getFileSysNames(fs.FS(Files), ".")
+	return files
 }
 
 func CompileTimeCheck(fsys fs.FS) error {

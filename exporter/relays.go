@@ -1,14 +1,17 @@
 package exporter
 
 import (
+	"database/sql"
 	"encoding/json"
-	"eth2-exporter/db"
-	"eth2-exporter/types"
-	"eth2-exporter/utils"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/db"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 
 	"github.com/sirupsen/logrus"
 )
@@ -30,32 +33,75 @@ func mevBoostRelaysExporter() {
 	for {
 		// we retrieve the relays from the db each loop to prevent having to restart the exporter for changes
 		relays = nil
-		err := db.ReaderDb.Select(&relays, `select * from relays`)
+		err := db.ReaderDb.Select(&relays, `select tag_id, endpoint, public_link, is_censoring, is_ethical, export_failure_count, last_export_try_ts, last_export_success_ts from relays`)
 		wg := &sync.WaitGroup{}
+		mux := &sync.Mutex{}
 		if err == nil {
 			for _, relay := range relays {
-				// create relay logger
-				relay.Logger = *logrus.New().WithFields(
-					logrus.Fields{"module": "exporter", "relay": relay.ID})
-				wg.Add(1)
-				go singleRelayExport(relay, wg)
+				if shouldTryToExportRelay(relay) {
+					// create relay logger
+					relay.Logger = *logrus.New().WithFields(
+						logrus.Fields{"module": "exporter", "relay": relay.ID})
+					wg.Add(1)
+					go singleRelayExport(relay, wg, mux)
+				}
 			}
-		} else {
-			logger.Warnf("failed to retrieve relays from db: %v", err)
+		} else if err != sql.ErrNoRows {
+			utils.LogError(err, "failed to retrieve relays from db", 0)
 		}
 		wg.Wait()
-		time.Sleep(time.Second * 60)
+		time.Sleep(time.Minute)
 	}
 
 }
 
-func singleRelayExport(r types.Relay, wg *sync.WaitGroup) {
+func singleRelayExport(r types.Relay, wg *sync.WaitGroup, mux *sync.Mutex) {
 	defer wg.Done()
+
 	err := exportRelayBlocks(r)
 	if err != nil {
-		r.Logger.Errorf("failed to export blocks for relay: %v", err)
+		errMsg := fmt.Errorf("failed to export blocks for relay: %v", err)
+		if shouldLogExportAsError(r) {
+			r.Logger.Error(errMsg)
+		} else {
+			r.Logger.Warn(errMsg)
+		}
+
+		// Only increase the export_failure_count if we haven't already reached the maximum wait time
+		_, isMaxWaitTime := waitTimeToExportRelay(r)
+		mux.Lock()
+		if isMaxWaitTime {
+			_, err = db.WriterDb.Exec(`
+			UPDATE relays SET
+				last_export_try_ts = (NOW() AT TIME ZONE 'utc')
+			WHERE tag_id = $1 AND endpoint = $2`, r.ID, r.Endpoint)
+		} else {
+			_, err = db.WriterDb.Exec(`
+			UPDATE relays SET
+				export_failure_count = $1,
+				last_export_try_ts = (NOW() AT TIME ZONE 'utc')
+			WHERE tag_id = $2 AND endpoint = $3`, r.ExportFailureCount+1, r.ID, r.Endpoint)
+		}
+		mux.Unlock()
+		if err != nil {
+			r.Logger.Errorf("Could not update failed relay export: %v", r.ID)
+		}
+
 		return
 	}
+
+	mux.Lock()
+	_, err = db.WriterDb.Exec(`
+			UPDATE relays SET
+				export_failure_count = 0,
+				last_export_try_ts = (NOW() AT TIME ZONE 'utc'),
+				last_export_success_ts = (NOW() AT TIME ZONE 'utc')
+			WHERE tag_id = $1 AND endpoint = $2`, r.ID, r.Endpoint)
+	mux.Unlock()
+	if err != nil {
+		r.Logger.Errorf("Could not update successful relay eport: %v", r.ID)
+	}
+
 	r.Logger.Infof("finished syncing payloads from relay")
 }
 
@@ -89,7 +135,7 @@ func fetchDeliveredPayloads(r types.Relay, offset uint64) ([]BidTrace, error) {
 func exportRelayBlocks(r types.Relay) error {
 	// retrieve the oldest tag usage so we know when to stop processing payloads from the head
 	var lastUsage types.RelayBlock
-	err := db.ReaderDb.Get(&lastUsage, `SELECT * FROM relays_blocks WHERE tag_id=$1 ORDER BY block_slot DESC LIMIT 1`, r.ID)
+	err := db.ReaderDb.Get(&lastUsage, `SELECT tag_id, block_slot, block_root, exec_block_hash, value, builder_pubkey, proposer_pubkey, proposer_fee_recipient FROM relays_blocks WHERE tag_id=$1 ORDER BY block_slot DESC LIMIT 1`, r.ID)
 	if err != nil {
 		r.Logger.Errorf("failed to retrieve last relay block from db, assuming none set: %v", err)
 	}
@@ -102,7 +148,7 @@ func exportRelayBlocks(r types.Relay) error {
 
 	// to make sure we dont have an incomplete table, check if there are any payloads before our first tag usage
 	var firstUsage types.RelayBlock
-	err = db.ReaderDb.Get(&firstUsage, `SELECT * FROM relays_blocks WHERE tag_id=$1 ORDER BY block_slot ASC LIMIT 1`, r.ID)
+	err = db.ReaderDb.Get(&firstUsage, `SELECT tag_id, block_slot, block_root, exec_block_hash, value, builder_pubkey, proposer_pubkey, proposer_fee_recipient FROM relays_blocks WHERE tag_id=$1 ORDER BY block_slot ASC LIMIT 1`, r.ID)
 	if err != nil {
 		r.Logger.Errorf("failed to retrieve first relay block from db, assuming none set: %v", err)
 	}
@@ -154,7 +200,7 @@ func retrieveAndInsertPayloadsFromRelay(r types.Relay, low_bound uint64, high_bo
 		}
 
 		if resp == nil {
-			r.Logger.Errorf("got no payloads")
+			r.Logger.Error("got no payloads")
 			break
 		}
 
@@ -196,7 +242,7 @@ func retrieveAndInsertPayloadsFromRelay(r types.Relay, low_bound uint64, high_bo
 				utils.MustParseHex(payload.ProposerPubkey),
 				utils.MustParseHex(payload.ProposerFeeRecipient))
 			if err != nil {
-				r.Logger.Error("failled to insert payload into relays_blocks table")
+				r.Logger.Error("failed to insert payload into relays_blocks table")
 				return err
 			}
 		}
@@ -223,4 +269,29 @@ func retrieveAndInsertPayloadsFromRelay(r types.Relay, low_bound uint64, high_bo
 		time.Sleep(time.Second * 1)
 	}
 	return tx.Commit()
+}
+
+func shouldTryToExportRelay(r types.Relay) bool {
+	if r.ExportFailureCount == 0 {
+		return true
+	}
+
+	waitTime, _ := waitTimeToExportRelay(r)
+	return time.Since(r.LastExportTryTs) >= waitTime
+}
+
+func waitTimeToExportRelay(r types.Relay) (waitTime time.Duration, isMaxWaitTime bool) {
+	maxWaitTimeForRelayExport := utils.Day
+	waitTime = time.Duration(math.Exp2(float64(r.ExportFailureCount))) * time.Minute
+	if waitTime >= maxWaitTimeForRelayExport {
+		waitTime = maxWaitTimeForRelayExport
+		isMaxWaitTime = true
+	}
+	return
+}
+
+func shouldLogExportAsError(r types.Relay) bool {
+	maxWaitTimeForRelayExportError := utils.Month
+
+	return time.Since(r.LastExportSuccessTs) >= maxWaitTimeForRelayExportError
 }

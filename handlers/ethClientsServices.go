@@ -1,23 +1,25 @@
 package handlers
 
 import (
-	"eth2-exporter/db"
-	ethclients "eth2-exporter/ethClients"
-	"eth2-exporter/templates"
-	"eth2-exporter/types"
 	"net/http"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/db"
+	ethclients "github.com/gobitfly/eth2-beaconchain-explorer/ethClients"
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
 
 	"github.com/gorilla/csrf"
 )
 
 func EthClientsServices(w http.ResponseWriter, r *http.Request) {
-	var ethClientsServicesTemplate = templates.GetTemplate("layout.html", "ethClientsServices.html")
+	templateFiles := append(layoutTemplateFiles, "ethClientsServices.html")
+	var ethClientsServicesTemplate = templates.GetTemplate(templateFiles...)
 
 	var err error
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "services", "/ethClientsServices", "Ethereum Clients Services Overview")
+	data := InitPageData(w, r, "services", "/ethClientsServices", "Ethereum Clients Services Overview", templateFiles)
 
 	pageData := ethclients.GetEthClientData()
 	pageData.CsrfField = csrf.TemplateField(r)
@@ -51,6 +53,8 @@ func EthClientsServices(w http.ResponseWriter, r *http.Request) {
 				pageData.Nimbus.IsUserSubscribed = true
 			case "erigon":
 				pageData.Erigon.IsUserSubscribed = true
+			case "reth":
+				pageData.Reth.IsUserSubscribed = true
 			case "rocketpool":
 				pageData.RocketpoolSmartnode.IsUserSubscribed = true
 			case "mev-boost":

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"firebase.google.com/go/messaging"
+	"firebase.google.com/go/v4/messaging"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/lib/pq"
@@ -46,10 +46,20 @@ const (
 	TaxReportEventName                               EventName = "user_tax_report"
 	RocketpoolCommissionThresholdEventName           EventName = "rocketpool_commision_threshold"
 	RocketpoolNewClaimRoundStartedEventName          EventName = "rocketpool_new_claimround"
-	RocketpoolColleteralMinReached                   EventName = "rocketpool_colleteral_min"
-	RocketpoolColleteralMaxReached                   EventName = "rocketpool_colleteral_max"
+	RocketpoolCollateralMinReached                   EventName = "rocketpool_colleteral_min"
+	RocketpoolCollateralMaxReached                   EventName = "rocketpool_colleteral_max"
 	SyncCommitteeSoon                                EventName = "validator_synccommittee_soon"
 )
+
+var MachineEvents = []EventName{
+	MonitoringMachineCpuLoadEventName,
+	MonitoringMachineOfflineEventName,
+	MonitoringMachineDiskAlmostFullEventName,
+	MonitoringMachineCpuLoadEventName,
+	MonitoringMachineMemoryUsageEventName,
+	MonitoringMachineSwitchedToETH2FallbackEventName,
+	MonitoringMachineSwitchedToETH1FallbackEventName,
+}
 
 var UserIndexEvents = []EventName{
 	EthClientUpdateEventName,
@@ -72,14 +82,14 @@ var EventLabel map[EventName]string = map[EventName]string{
 	ValidatorDidSlashEventName:                       "Your validator(s) slashed another validator",
 	ValidatorIsOfflineEventName:                      "Your validator(s) state changed",
 	ValidatorReceivedDepositEventName:                "Your validator(s) received a deposit",
-	ValidatorReceivedWithdrawalEventName:             "Your validator(s) received a withdrawal",
+	ValidatorReceivedWithdrawalEventName:             "A withdrawal was initiated for your validators",
 	NetworkSlashingEventName:                         "A slashing event has been registered by the network",
 	NetworkValidatorActivationQueueFullEventName:     "The activation queue is full",
 	NetworkValidatorActivationQueueNotFullEventName:  "The activation queue is empty",
 	NetworkValidatorExitQueueFullEventName:           "The validator exit queue is full",
 	NetworkValidatorExitQueueNotFullEventName:        "The validator exit queue is empty",
 	NetworkLivenessIncreasedEventName:                "The network is experiencing liveness issues",
-	EthClientUpdateEventName:                         "A ethereum client has a new available update",
+	EthClientUpdateEventName:                         "An Ethereum client has a new update available",
 	MonitoringMachineOfflineEventName:                "Your machine(s) might be offline",
 	MonitoringMachineDiskAlmostFullEventName:         "Your machine(s) disk space is running low",
 	MonitoringMachineCpuLoadEventName:                "Your machine(s) has a high CPU load",
@@ -87,15 +97,24 @@ var EventLabel map[EventName]string = map[EventName]string{
 	MonitoringMachineSwitchedToETH2FallbackEventName: "Your machine(s) is using its consensus client fallback",
 	MonitoringMachineSwitchedToETH1FallbackEventName: "Your machine(s) is using its execution client fallback",
 	TaxReportEventName:                               "You have an available tax report",
-	RocketpoolCommissionThresholdEventName:           "Your configured rocket pool commission threshold is reached",
-	RocketpoolNewClaimRoundStartedEventName:          "Your rocket pool claim round is available",
-	RocketpoolColleteralMinReached:                   "You reached the rocketpool min collateral",
-	RocketpoolColleteralMaxReached:                   "You reached the rocketpool max collateral",
+	RocketpoolCommissionThresholdEventName:           "Your configured Rocket Pool commission threshold is reached",
+	RocketpoolNewClaimRoundStartedEventName:          "Your Rocket Pool claim from last round is available",
+	RocketpoolCollateralMinReached:                   "You reached the Rocket Pool min RPL collateral",
+	RocketpoolCollateralMaxReached:                   "You reached the Rocket Pool max RPL collateral",
 	SyncCommitteeSoon:                                "Your validator(s) will soon be part of the sync committee",
 }
 
 func IsUserIndexed(event EventName) bool {
 	for _, ev := range UserIndexEvents {
+		if ev == event {
+			return true
+		}
+	}
+	return false
+}
+
+func IsMachineNotification(event EventName) bool {
+	for _, ev := range MachineEvents {
 		if ev == event {
 			return true
 		}
@@ -129,8 +148,8 @@ var EventNames = []EventName{
 	TaxReportEventName,
 	RocketpoolCommissionThresholdEventName,
 	RocketpoolNewClaimRoundStartedEventName,
-	RocketpoolColleteralMinReached,
-	RocketpoolColleteralMaxReached,
+	RocketpoolCollateralMinReached,
+	RocketpoolCollateralMaxReached,
 	SyncCommitteeSoon,
 }
 
@@ -291,12 +310,14 @@ type MobileSubscriptionTransactionGeneric struct {
 }
 
 type PremiumData struct {
-	ID        uint64    `db:"id"`
-	Receipt   string    `db:"receipt"`
-	Store     string    `db:"store"`
-	Active    bool      `db:"active"`
-	ProductID string    `db:"product_id"`
-	ExpiresAt time.Time `db:"expires_at"`
+	ID               uint64    `db:"id"`
+	Receipt          string    `db:"receipt"`
+	Store            string    `db:"store"`
+	Active           bool      `db:"active"`
+	ValidateRemotely bool      `db:"validate_remotely"`
+	ProductID        string    `db:"product_id"`
+	UserID           uint64    `db:"user_id"`
+	ExpiresAt        time.Time `db:"expires_at"`
 }
 
 type UserWithPremium struct {
@@ -503,6 +524,12 @@ func (a ErrorResponse) Value() (driver.Value, error) {
 	return json.Marshal(a)
 }
 
+type EnsSearchPageData = struct {
+	Error  string
+	Search string
+	Result *EnsDomainResponse
+}
+
 type GasNowPageData struct {
 	Code int `json:"code"`
 	Data struct {
@@ -524,16 +551,72 @@ type Eth1AddressSearchItem struct {
 }
 
 type RawMempoolResponse struct {
-	Pending map[string]map[int]RawMempoolTransaction `json:"pending"`
+	Pending map[string]map[string]*RawMempoolTransaction `json:"pending"`
+	Queued  map[string]map[string]*RawMempoolTransaction `json:"queued"`
+	BaseFee map[string]map[string]*RawMempoolTransaction `json:"baseFee"`
+
+	TxsByHash map[common.Hash]*RawMempoolTransaction
+}
+
+func (mempool RawMempoolResponse) FindTxByHash(txHashString string) *RawMempoolTransaction {
+	return mempool.TxsByHash[common.HexToHash(txHashString)]
 }
 
 type RawMempoolTransaction struct {
-	Hash      common.Hash     `json:"hash"`
-	From      *common.Address `json:"from"`
-	To        *common.Address `json:"to"`
-	Value     *hexutil.Big    `json:"value"`
-	Gas       *hexutil.Big    `json:"gas"`
-	GasFeeCap *hexutil.Big    `json:"maxFeePerGas,omitempty"`
-	GasPrice  *hexutil.Big    `json:"gasPrice"`
-	Nonce     *hexutil.Big    `json:"nonce"`
+	Hash             common.Hash     `json:"hash"`
+	From             *common.Address `json:"from"`
+	To               *common.Address `json:"to"`
+	Value            *hexutil.Big    `json:"value"`
+	Gas              *hexutil.Big    `json:"gas"`
+	GasFeeCap        *hexutil.Big    `json:"maxFeePerGas,omitempty"`
+	GasTipCap        *hexutil.Big    `json:"maxPriorityFeePerGas,omitempty"`
+	GasPrice         *hexutil.Big    `json:"gasPrice"`
+	Nonce            *hexutil.Big    `json:"nonce"`
+	Input            *string         `json:"input"`
+	TransactionIndex *hexutil.Big    `json:"transactionIndex"`
+}
+
+type MempoolTxPageData struct {
+	RawMempoolTransaction
+	TargetIsContract   bool
+	IsContractCreation bool
+}
+
+type SyncCommitteesStats struct {
+	ParticipatedSlots uint64 `db:"participated_sync" json:"participatedSlots"`
+	MissedSlots       uint64 `db:"missed_sync" json:"missedSlots"`
+	OrphanedSlots     uint64 `db:"orphaned_sync" json:"-"`
+	ScheduledSlots    uint64 `json:"scheduledSlots"`
+}
+
+type SignatureType string
+
+const (
+	MethodSignature SignatureType = "method"
+	EventSignature  SignatureType = "event"
+)
+
+type SignatureImportStatus struct {
+	LatestTimestamp *string `json:"latestTimestamp"`
+	NextPage        *string `json:"nextPage"`
+	HasFinished     bool    `json:"hasFinished"`
+}
+
+type Signature struct {
+	Id        int64  `json:"id"`
+	CreatedAt string `json:"created_at"`
+	Text      string `json:"text_signature"`
+	Hex       string `json:"hex_signature"`
+	Bytes     string `json:"bytes_signature"`
+}
+
+type SearchValidatorsByEth1Result []struct {
+	Eth1Address      string        `db:"from_address_text" json:"eth1_address"`
+	ValidatorIndices pq.Int64Array `db:"validatorindices" json:"validator_indices"`
+	Count            uint64        `db:"count" json:"-"`
+}
+
+type ValidatorStateCountRow struct {
+	Name  string `db:"status"`
+	Count uint64 `db:"validator_count"`
 }

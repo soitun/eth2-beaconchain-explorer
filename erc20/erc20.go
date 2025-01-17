@@ -3,9 +3,11 @@ package erc20
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"math/big"
+	"os"
 	"strings"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/shopspring/decimal"
@@ -21,9 +23,9 @@ var tokenMap = make(map[string]*ERC20TokenDetail)
 var logger = logrus.StandardLogger().WithField("module", "erc20")
 
 func InitTokenList(path string) {
-	body, err := ioutil.ReadFile(path)
+	body, err := os.ReadFile(path)
 	if err != nil {
-		logger.Fatal("unable to retrieve erc20 token list", err)
+		utils.LogFatal(err, "unable to retrieve erc20 token list", 0)
 	}
 	TokenList := &ERC20TokenList{}
 
