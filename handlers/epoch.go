@@ -3,39 +3,46 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
-	"eth2-exporter/db"
-	"eth2-exporter/templates"
-	"eth2-exporter/types"
-	"eth2-exporter/utils"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/db"
+	"github.com/gobitfly/eth2-beaconchain-explorer/services"
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 
 	"github.com/gorilla/mux"
 )
 
 // Epoch will show the epoch using a go template
 func Epoch(w http.ResponseWriter, r *http.Request) {
+	epochTemplateFiles := append(layoutTemplateFiles,
+		"epoch.html",
+		"components/timestamp.html")
+	epochFutureTemplateFiles := append(layoutTemplateFiles,
+		"epochFuture.html",
+		"components/timestamp.html")
+	epochNotFoundTemplateFiles := append(layoutTemplateFiles, "epochnotfound.html")
+	var epochTemplate = templates.GetTemplate(epochTemplateFiles...)
+	var epochFutureTemplate = templates.GetTemplate(epochFutureTemplateFiles...)
+	var epochNotFoundTemplate = templates.GetTemplate(epochNotFoundTemplateFiles...)
 
-	var epochTemplate = templates.GetTemplate("layout.html", "epoch.html")
-	var epochFutureTemplate = templates.GetTemplate("layout.html", "epochFuture.html")
-	var epochNotFoundTemplate = templates.GetTemplate("layout.html", "epochnotfound.html")
-
-	const MaxEpochValue = 4294967296 // we only render a page for epochs up to this value
+	const MaxEpochValue = math.MaxUint32 + 1 // we only render a page for epochs up to this value
 
 	w.Header().Set("Content-Type", "text/html")
 	vars := mux.Vars(r)
 	epochString := strings.Replace(vars["epoch"], "0x", "", -1)
-
-	data := InitPageData(w, r, "blockchain", "/epochs", "Epoch")
-	data.HeaderAd = true
+	epochTitle := fmt.Sprintf("Epoch %v", epochString)
 
 	epoch, err := strconv.ParseUint(epochString, 10, 64)
+	metaPath := fmt.Sprintf("/epoch/%v", epoch)
 
 	if err != nil {
-		SetPageDataTitle(data, fmt.Sprintf("Epoch %v", epochString))
-		data.Meta.Path = "/epoch/" + epochString
+		data := InitPageData(w, r, "blockchain", metaPath, epochTitle, append(layoutTemplateFiles, epochNotFoundTemplateFiles...))
 
 		if handleTemplateError(w, r, "epoch.go", "Epoch", "parse epochString", epochNotFoundTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 			return // an error has occurred and was processed
@@ -43,10 +50,8 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	SetPageDataTitle(data, fmt.Sprintf("Epoch %v", epochString))
-	data.Meta.Path = fmt.Sprintf("/epoch/%v", epoch)
-
 	epochPageData := types.EpochPageData{}
+	latestFinalizedEpoch := services.LatestFinalizedEpoch()
 
 	err = db.ReaderDb.Get(&epochPageData, `
 		SELECT 
@@ -55,20 +60,20 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 			proposerslashingscount, 
 			attesterslashingscount, 
 			attestationscount, 
-			withdrawalcount,
 			depositscount, 
 			voluntaryexitscount, 
 			validatorscount, 
 			averagevalidatorbalance, 
-			finalized,
+			(epoch <= $2) AS finalized,
 			eligibleether,
 			globalparticipationrate,
 			votedether
 		FROM epochs 
-		WHERE epoch = $1`, epoch)
+		WHERE epoch = $1`, epoch, latestFinalizedEpoch)
 	if err != nil {
 		//Epoch not in database -> Show future epoch
 		if epoch > MaxEpochValue {
+			data := InitPageData(w, r, "blockchain", metaPath, epochTitle, append(layoutTemplateFiles, epochNotFoundTemplateFiles...))
 			if handleTemplateError(w, r, "epoch.go", "Epoch", ">MaxEpochValue", epochNotFoundTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 				return // an error has occurred and was processed
 			}
@@ -76,20 +81,21 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 		}
 
 		//Create placeholder structs
-		blocks := make([]*types.IndexPageDataBlocks, 32)
+		blocks := make([]*types.IndexPageDataBlocks, utils.Config.Chain.ClConfig.SlotsPerEpoch)
 		for i := range blocks {
-			slot := uint64(i) + epoch*32
+			slot := uint64(i) + (epoch * utils.Config.Chain.ClConfig.SlotsPerEpoch)
 			block := types.IndexPageDataBlocks{
 				Epoch:  epoch,
 				Slot:   slot,
 				Ts:     utils.SlotToTime(slot),
 				Status: 4,
 			}
-			blocks[31-i] = &block
+			n := int(utils.Config.Chain.ClConfig.SlotsPerEpoch) - 1 - i
+			blocks[n] = &block
 		}
 		epochPageData = types.EpochPageData{
 			Epoch:         epoch,
-			BlocksCount:   32,
+			BlocksCount:   utils.Config.Chain.ClConfig.SlotsPerEpoch,
 			PreviousEpoch: epoch - 1,
 			NextEpoch:     epoch + 1,
 			Ts:            utils.EpochToTime(epoch),
@@ -97,6 +103,7 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 		}
 
 		//Render template
+		data := InitPageData(w, r, "blockchain", metaPath, epochTitle, append(layoutTemplateFiles, epochFutureTemplateFiles...))
 		data.Data = epochPageData
 		if handleTemplateError(w, r, "epoch.go", "Epoch", "Done (not in Database)", epochFutureTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 			return // an error has occurred and was processed
@@ -112,7 +119,7 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 			blocks.parentroot, 
 			blocks.attestationscount, 
 			blocks.depositscount,
-			blocks.withdrawalcount, 
+			COALESCE(blocks.withdrawalcount,0) as withdrawalcount, 
 			blocks.voluntaryexitscount, 
 			blocks.proposerslashingscount, 
 			blocks.attesterslashingscount,
@@ -126,6 +133,7 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 		ORDER BY blocks.slot DESC`, epoch)
 	if err != nil {
 		logger.Errorf("error epoch blocks data: %v", err)
+		data := InitPageData(w, r, "blockchain", metaPath, epochTitle, append(layoutTemplateFiles, epochNotFoundTemplateFiles...))
 
 		if handleTemplateError(w, r, "epoch.go", "Epoch", "read Blocks from db", epochNotFoundTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 			return // an error has occurred and was processed
@@ -143,6 +151,7 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 		case 1:
 			epochPageData.ProposedCount += 1
 			epochPageData.SyncParticipationRate += block.SyncAggParticipation
+			epochPageData.WithdrawalCount += block.Withdrawals
 		case 2:
 			epochPageData.MissedCount += 1
 		case 3:
@@ -181,6 +190,7 @@ func Epoch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	data := InitPageData(w, r, "blockchain", metaPath, epochTitle, append(layoutTemplateFiles, epochTemplateFiles...))
 	data.Data = epochPageData
 
 	if utils.IsApiRequest(r) {

@@ -2,9 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
-	"eth2-exporter/db"
-	"eth2-exporter/templates"
-	"eth2-exporter/types"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/db"
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
 
 	"net/http"
 	"time"
@@ -13,8 +14,8 @@ import (
 // Blocks will return information about blocks using a go template
 func Correlations(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
-
-	data := InitPageData(w, r, "correlations", "/correlations", "Correlations")
+	templateFiles := append(layoutTemplateFiles, "correlations.html")
+	data := InitPageData(w, r, "correlations", "/correlations", "Correlations", templateFiles)
 
 	var indicators []string
 	err := db.ReaderDb.Select(&indicators, "SELECT DISTINCT(indicator) AS indicator FROM chart_series WHERE time > NOW() - INTERVAL '1 week' ORDER BY indicator;")
@@ -27,22 +28,7 @@ func Correlations(w http.ResponseWriter, r *http.Request) {
 
 	data.Data = indicators
 
-	var correlationsTemplate = templates.GetTemplate("layout.html", "correlations.html")
-
-	// data := &types.PageData{
-	// 	HeaderAd: true,
-	// 	Meta: &types.Meta{
-	// 		Image:       "https://etherchain.org/img/ballon-512x512.png",
-	// 		Title:       fmt.Sprintf("%v - Correlations - etherchain.org - %v", utils.Config.Frontend.SiteName, time.Now().Year()),
-	// 		Description: "etherchain.org makes the Ethereum block chain accessible to non-technical end users",
-	// 		Path:        "/correlations",
-	// 		GATag:       utils.Config.Frontend.GATag,
-	// 	},
-	// 	Active:       "stats",
-	// 	Data:         indicators,
-	// 	CurrentBlock: services.LatestBlock(),
-	// 	GPO:          services.LatestGasNowData(),
-	// }
+	var correlationsTemplate = templates.GetTemplate(templateFiles...)
 
 	if handleTemplateError(w, r, "correlations.go", "Correlations", "", correlationsTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 		return // an error has occurred and was processed

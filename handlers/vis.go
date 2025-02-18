@@ -2,24 +2,26 @@ package handlers
 
 import (
 	"encoding/json"
-	"eth2-exporter/db"
-	"eth2-exporter/templates"
-	"eth2-exporter/types"
-	"eth2-exporter/utils"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/db"
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 )
 
 // Vis returns the visualizations using a go template
 func Vis(w http.ResponseWriter, r *http.Request) {
-	var visTemplate = templates.GetTemplate("layout.html", "vis.html")
+	templateFiles := append(layoutTemplateFiles, "vis.html")
+	var visTemplate = templates.GetTemplate(templateFiles...)
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "stats", "/viz", "Visualizations")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "stats", "/viz", "Visualizations", templateFiles)
 
 	if handleTemplateError(w, r, "vis.go", "Vis", "", visTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 		return // an error has occurred and was processed
@@ -41,13 +43,20 @@ func VisBlocks(w http.ResponseWriter, r *http.Request) {
 
 	sinceSlot := utils.TimeToSlot(uint64(since - 120))
 
+	// slot in postgres is limited to int
+	if sinceSlot > math.MaxInt32 {
+		logger.Warnf("error retrieving block tree data, slot too big: %v", err)
+		http.Error(w, "Error: Invalid parameter since.", http.StatusBadRequest)
+		return
+	}
+
 	var chartData []*types.VisChartData
 
 	err = db.ReaderDb.Select(&chartData, "select slot, blockroot, parentroot, proposer from blocks where slot >= $1 and status in ('1', '2') order by slot desc limit 50;", sinceSlot)
 
 	if err != nil {
 		logger.Errorf("error retrieving block tree data: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -70,14 +79,15 @@ func VisBlocks(w http.ResponseWriter, r *http.Request) {
 	err = json.NewEncoder(w).Encode(chartData)
 	if err != nil {
 		logger.Errorf("error enconding json response for %v route: %v", r.URL.String(), err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 }
 
 // VisVotes shows the votes visualizations using a go template
 func VisVotes(w http.ResponseWriter, r *http.Request) {
-	var visVotesTemplate = templates.GetTemplate("layout.html", "vis_votes.html")
+	templateFiles := append(layoutTemplateFiles, "vis_votes.html")
+	var visVotesTemplate = templates.GetTemplate(templateFiles...)
 
 	var err error
 
@@ -100,7 +110,7 @@ func VisVotes(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		logger.Errorf("error retrieving votes tree data: %v", err)
-		http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -111,7 +121,7 @@ func VisVotes(w http.ResponseWriter, r *http.Request) {
 		err := rows.Scan(&data.Slot, &data.BlockRoot, &data.ParentRoot, &data.Validators)
 		if err != nil {
 			logger.Errorf("error scanning votes tree data: %v", err)
-			http.Error(w, "Internal server error", http.StatusServiceUnavailable)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 		chartData = append(chartData, data)
@@ -119,8 +129,7 @@ func VisVotes(w http.ResponseWriter, r *http.Request) {
 
 	logger.Printf("returning %v entries since %v", len(chartData), sinceSlot)
 
-	data := InitPageData(w, r, "vis", "/vis", "Votes")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "vis", "/vis", "Votes", templateFiles)
 	data.Data = &types.VisVotesPageData{ChartData: chartData}
 
 	if handleTemplateError(w, r, "vis.go", "VisVotes", "", visVotesTemplate.ExecuteTemplate(w, "layout", data)) != nil {

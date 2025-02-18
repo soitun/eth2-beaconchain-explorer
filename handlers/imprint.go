@@ -1,52 +1,25 @@
 package handlers
 
 import (
-	"eth2-exporter/templates"
-	"eth2-exporter/utils"
 	"html/template"
 	"net/http"
-	"os"
-	"path"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 )
+
+var imprintTemplate *template.Template
 
 // Imprint will show the imprint data using a go template
 func Imprint(w http.ResponseWriter, r *http.Request) {
+	if imprintTemplate == nil {
+		imprintTemplate = template.Must(template.Must(templates.GetTemplate(layoutTemplateFiles...).Clone()).Parse(utils.Config.Frontend.Legal.ImprintTemplate))
+	}
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "imprint", "/imprint", "Imprint")
-	data.HeaderAd = true
+	data := InitPageData(w, r, "imprint", "/imprint", "Imprint", layoutTemplateFiles)
 
-	if handleTemplateError(w, r, "imprint.go", "Imprint", "", getImprintTemplate(getImprintPath()).ExecuteTemplate(w, "layout", data)) != nil {
+	if handleTemplateError(w, r, "imprint.go", "Imprint", "", imprintTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 		return // an error has occurred and was processed
 	}
-}
-
-func CheckAndPreloadImprint() error {
-	imprintPath := getImprintPath()
-	if len(imprintPath) > 0 {
-		_, err := os.Stat(imprintPath) // check file exists
-		if err != nil {
-			return err
-		}
-	}
-
-	getImprintTemplate(imprintPath) // preload
-	return nil
-}
-
-func getImprintPath() string {
-	if utils.Config.Frontend.LegalDir == "" {
-		return utils.Config.Frontend.Imprint
-	}
-	return path.Join(utils.Config.Frontend.LegalDir, "index.html")
-}
-
-func getImprintTemplate(path string) *template.Template {
-	if len(path) == 0 {
-		return templates.GetTemplate("layout.html", "imprint.example.html")
-	}
-
-	var imprintTemplate = templates.GetTemplate("layout.html")
-	imprintTemplate = templates.AddTemplateFile(imprintTemplate, path)
-	return imprintTemplate
 }

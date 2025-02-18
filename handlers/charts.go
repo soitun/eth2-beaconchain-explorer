@@ -2,11 +2,14 @@ package handlers
 
 import (
 	"encoding/json"
-	"eth2-exporter/services"
-	"eth2-exporter/templates"
-	"eth2-exporter/types"
 	"fmt"
 	"net/http"
+	"strings"
+
+	"github.com/gobitfly/eth2-beaconchain-explorer/services"
+	"github.com/gobitfly/eth2-beaconchain-explorer/templates"
+	"github.com/gobitfly/eth2-beaconchain-explorer/types"
+	"github.com/gobitfly/eth2-beaconchain-explorer/utils"
 
 	"github.com/gorilla/mux"
 )
@@ -15,13 +18,13 @@ const CHART_PREVIEW_POINTS = 100
 
 // Charts uses a go template for presenting the page to show charts
 func Charts(w http.ResponseWriter, r *http.Request) {
-
-	var chartsTemplate = templates.GetTemplate("layout.html", "charts.html")
-	var chartsUnavailableTemplate = templates.GetTemplate("layout.html", "chartsunavailable.html")
+	templateFiles := append(layoutTemplateFiles, "charts.html")
+	var chartsTemplate = templates.GetTemplate(templateFiles...)
+	var chartsUnavailableTemplate = templates.GetTemplate(append(layoutTemplateFiles, "chartsunavailable.html")...)
 
 	w.Header().Set("Content-Type", "text/html")
 
-	data := InitPageData(w, r, "stats", "/charts", "Charts")
+	data := InitPageData(w, r, "stats", "/charts", "Charts", templateFiles)
 
 	chartsPageData := services.LatestChartsPageData()
 
@@ -40,11 +43,18 @@ func Charts(w http.ResponseWriter, r *http.Request) {
 		cpd = append(cpd, chartData)
 	}
 
+	disclaimer := ""
 	for _, chart := range cpd {
 		chart.Data.Series = nil
+
+		// If at least one chart shows info about ETH.STORE, then show the disclaimer
+		if disclaimer == "" && strings.Contains(chart.Data.Subtitle, "ETH.STORE®") {
+			disclaimer = services.EthStoreDisclaimer()
+		}
 	}
 
-	data.Data = cpd
+	data.Data = &types.ChartsPageData{ChartsPageDataCharts: cpd, Disclaimer: disclaimer}
+
 	if handleTemplateError(w, r, "charts.go", "Charts", "Done", chartsTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 		return // an error has occurred and was processed
 	}
@@ -64,15 +74,15 @@ func Chart(w http.ResponseWriter, r *http.Request) {
 
 // GenericChart uses a go template for presenting the page of a generic chart
 func GenericChart(w http.ResponseWriter, r *http.Request) {
-
-	var genericChartTemplate = templates.GetTemplate("layout.html", "genericchart.html")
-	var chartsUnavailableTemplate = templates.GetTemplate("layout.html", "chartsunavailable.html")
+	templateFiles := append(layoutTemplateFiles, "genericchart.html")
+	var genericChartTemplate = templates.GetTemplate(templateFiles...)
+	var chartsUnavailableTemplate = templates.GetTemplate(append(layoutTemplateFiles, "chartsunavailable.html")...)
 
 	vars := mux.Vars(r)
 	chartVar := vars["chart"]
 
 	w.Header().Set("Content-Type", "text/html")
-	data := InitPageData(w, r, "stats", "/charts", "Chart")
+	data := InitPageData(w, r, "stats", "/charts", "Chart", templateFiles)
 
 	chartsPageData := services.LatestChartsPageData()
 	if chartsPageData == nil {
@@ -91,7 +101,7 @@ func GenericChart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if chartData == nil {
-		http.Error(w, "Not found", http.StatusNotFound)
+		NotFound(w, r)
 		return
 	}
 
@@ -112,8 +122,8 @@ func GenericChartData(w http.ResponseWriter, r *http.Request) {
 
 	chartsPageData := services.LatestChartsPageData()
 	if chartsPageData == nil {
-		logger.Error("error getting chart page data")
-		SendErrorResponse(w, r.URL.String(), "error getting chart page data")
+		utils.LogError(nil, "error getting chart page data", 0)
+		SendBadRequestResponse(w, r.URL.String(), "error getting chart page data")
 		return
 	}
 
@@ -126,25 +136,31 @@ func GenericChartData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if chartData == nil {
-		SendErrorResponse(w, r.URL.String(), fmt.Sprintf("error the chart you requested is not available. Chart: %v", chartVar))
+		SendBadRequestResponse(w, r.URL.String(), fmt.Sprintf("error the chart you requested is not available. Chart: %v", chartVar))
 		return
 	}
 
-	sendOKResponse(json.NewEncoder(w), r.URL.String(), []interface{}{chartData.Series})
+	SendOKResponse(json.NewEncoder(w), r.URL.String(), []interface{}{chartData.Series})
 }
 
 // SlotViz renders a single page with a d3 slot (block) visualisation
 func SlotViz(w http.ResponseWriter, r *http.Request) {
-	var slotVizTemplate = templates.GetTemplate("layout.html", "slotViz.html", "slotVizPage.html")
+	templateFiles := append(layoutTemplateFiles, "slotViz.html", "slotVizPage.html")
+	var slotVizTemplate = templates.GetTemplate(templateFiles...)
 
 	w.Header().Set("Content-Type", "text/html")
-	data := InitPageData(w, r, "stats", "/charts", "Charts")
+	data := InitPageData(w, r, "stats", "/charts", "Charts", templateFiles)
 
 	slotVizData := types.SlotVizPageData{
 		Selector: "checklist",
 		Epochs:   services.LatestSlotVizMetrics(),
 	}
-	data.Data = slotVizData
+	// The following struct is needed so that we can handle the SlotVizPageData same as in the index.go page.
+	data.Data = struct {
+		SlotVizData types.SlotVizPageData
+	}{
+		SlotVizData: slotVizData,
+	}
 	if handleTemplateError(w, r, "charts.go", "SlotViz", "", slotVizTemplate.ExecuteTemplate(w, "layout", data)) != nil {
 		return // an error has occurred and was processed
 	}
